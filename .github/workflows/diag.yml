@@ -2,12 +2,11 @@ name: diag
 on:
   push:
     paths: [".github/workflows/diag.yml"]
+concurrency:
+  group: rtx5080
+  cancel-in-progress: false
 jobs:
   hola:
     runs-on: ubuntu-latest
     steps:
-      - run: test -n "$SMTP_USER" && echo "secrets OK" || echo "secrets VACIOS"
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      - run: echo concurrency-rtx5080
