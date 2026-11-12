@@ -3,7 +3,7 @@
 Avisa por email (y con una notificación del Mac) cuando una **NVIDIA RTX 5080** (ni Ti, ni Super, ni portátiles, ni reacondicionadas)
 **se puede añadir al carrito** por **≤ 1700 €** (o el precio que pongas en `PRECIO_MAX`).
 
-Tiendas: PCComponentes, Coolmod, Life Informática y Amazon.es. En Amazon solo cuenta si lo vende Amazon o una marca
+Tiendas: PCComponentes, Coolmod, NeoByte, Life Informática y Amazon.es (siempre de menor a mayor precio). En Amazon solo cuenta si lo vende Amazon o una marca
 oficial (MSI, ASUS, Gigabyte/Aorus, Zotac, PNY, Inno3D, Palit, Gainward, KFA2, Galax, NVIDIA). Puedes cambiarlo con `AMAZON_VENDEDORES`.
 
 Solo te avisa una vez por producto, y otra vez si baja de precio.
@@ -35,13 +35,23 @@ pueden recibir más bloqueos antibot que tu casa.
 
 ## Check diario (20:00)
 Todos los días sobre las 20:00 (hora de España) GitHub te envía un email "Check diario RTX 5080" con:
-el estado de cada tienda (si se ha podido leer), la RTX 5080 más barata con stock en cada una, las 5 más baratas
-y cuántas comprobaciones automáticas se han hecho en las últimas 24 h.
+el estado de cada tienda (si se ha podido leer), las 5 RTX 5080 más baratas **con stock** de cada una (de menor a
+mayor, con enlace) y cuántas comprobaciones automáticas se han hecho en las últimas 24 h.
 **Si un día no te llega, algo falla.** Para probarlo a mano: Actions > "Check diario 20:00" > Run workflow,
 o en el Mac `.venv/bin/python bot.py --informe`.
 
 ## Diagnóstico
 `.venv/bin/python bot.py --prueba 2300` muestra todo lo que encontraría a ese precio y por qué lo acepta o lo descarta (no envía email).
+
+## Antibots y captchas
+- Usa Google Chrome real (no Chromium) con un perfil propio (`.perfil-chrome/`) que guarda las cookies que dan los
+  antibot, así no hay que pasar el reto en cada pasada.
+- Retos tipo Cloudflare ("Un momento…"): se espera a que se resuelvan solos. Si en modo sin ventana no se resuelven
+  (NeoByte), el bot abre un momento Chrome con ventana **fuera de la pantalla**, pasa el reto, guarda la cookie y sigue
+  sin ventana. En GitHub Actions eso se hace con una pantalla virtual (xvfb).
+- Si una ficha sigue bloqueada, decide con el listado (solo si muestra plazo de entrega y no pone "agotado").
+- Captchas de imagen (los de "elige los semáforos") **no se resuelven**: si aparecen, la tienda sale con ✗ en el
+  check diario.
 
 ## Limitaciones
 - **NVIDIA Marketplace / Founders Edition**: desde aquí no responde (error de conexión), así que no está incluido.

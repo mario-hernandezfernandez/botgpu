@@ -37,16 +37,18 @@ PRECIO_MIN = float(os.getenv("PRECIO_MIN", "700"))  # por debajo = accesorios, e
 AMAZON_VENDEDORES = [v.strip().lower() for v in os.getenv(
     "AMAZON_VENDEDORES",
     "amazon,msi,asus,gigabyte,aorus,zotac,pny,inno3d,palit,gainward,kfa2,galax,nvidia").split(",")]
-MAX_VERIFICAR = int(os.getenv("MAX_VERIFICAR", "8"))  # fichas de producto a abrir por tienda y pasada
+MAX_VERIFICAR = int(os.getenv("MAX_VERIFICAR", "5"))  # nº de RTX 5080 con stock a reunir por tienda (las más baratas)
+MAX_FICHAS = int(os.getenv("MAX_FICHAS", "10"))       # tope de fichas abiertas por tienda y pasada
 SEEN = BASE / "seen.json"
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
 def tiendas(tope=None):
     a, b = int(PRECIO_MIN * 100), int((tope or PRECIO_MAX) * 100)
     return {
         "PCComponentes": "https://www.pccomponentes.com/buscar/?query=rtx%205080",
-        "Coolmod": "https://www.coolmod.com/tarjetas-graficas/?q=rtx+5080",
+        # páginas de categoría solo RTX 5080, de menor a mayor precio
+        "Coolmod": "https://www.coolmod.com/tarjetas-graficas/serie-rtx-5080/?ordenacion=precio-menor",
+        "NeoByte": "https://www.neobyte.es/tarjetas-graficas-nvidia-149?q=Modelo-GeForce+RTX+5080&order=product.price.asc",
         "Life Informática": "https://lifeinformatica.com/#/dfclassic/query=rtx%205080&query_name=match_and",
         # Amazon: búsqueda en Informática ya filtrada por rango de precio
         "Amazon": f"https://www.amazon.es/s?k=nvidia+geforce+rtx+5080&i=computers&rh=p_36%3A{a}-{b}",
@@ -65,16 +67,15 @@ def es_rtx5080(titulo):
     return bool(MODELO.search(titulo or "")) and not NO_ES_GPU_5080.search(titulo or "")
 
 
-PRECIO_RE = re.compile(r"(\d{1,2}(?:[.\s]\d{3})+(?:,\d{1,2})?|\d{3,4}(?:,\d{1,2})?)\s*€")
+# "2.199,95 €", "1.999 95 €" (Coolmod), "1999 €", "2 199,95 €"
+PRECIO_RE = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.\s\u00a0]\d{3})+|\d{3,4})(?:[,\s\u00a0](\d{2}))?\s*€")
 
 
 def precios(txt):
     out = []
     for m in PRECIO_RE.finditer(txt or ""):
-        try:
-            out.append(float(m.group(1).replace(".", "").replace(" ", "").replace(",", ".")))
-        except ValueError:
-            pass
+        entero = re.sub(r"\D", "", m.group(1))
+        out.append(float(f"{entero}.{m.group(2) or '00'}"))
     return [p for p in out if PRECIO_MIN <= p <= 6000]
 
 
@@ -103,38 +104,81 @@ def normalizar(href):
 
 def bloqueado(page):
     t = (page.title() or "").lower()
-    return any(s in t for s in ("un momento", "just a moment", "access denied", "attention required", "robot")) \
-        or page.locator('form[action*="validateCaptcha"]').count() > 0
+    if any(s in t for s in ("un momento", "just a moment", "access denied", "attention required", "robot",
+                            "verificando", "checking your browser", "security check", "captcha", "pardon our interruption")):
+        return True
+    return page.locator('form[action*="validateCaptcha"], #challenge-form, #cf-challenge-running, '
+                        'iframe[src*="challenges.cloudflare.com"]:not([style*="display: none"]), #px-captcha, '
+                        'iframe[src*="captcha-delivery.com"]').count() > 0
+
+
+SIN_STOCK = re.compile(r"agotad|sin stock|sin unidades|fuera de stock|no disponible|av[ií]same|notif[ií]came|"
+                       r"pr[oó]ximamente|pre-?venta|reserva|bajo pedido", re.I)
 
 
 # ---------- listado ----------
 JS_LISTADO = r"""() => [...document.querySelectorAll('a[href]')].map(a => {
   const img = a.querySelector('img');
   const own = [a.innerText||'', a.title||'', a.getAttribute('aria-label')||'', img ? img.alt : ''].join(' ');
+  // sube hasta la "tarjeta" del producto: primer ancestro con precio que no contenga otros productos
   let n = a, t = a.innerText || '';
-  for (let i = 0; i < 6 && n.parentElement && !/\d\s*€/.test(t); i++) { n = n.parentElement; t = n.innerText || ''; }
+  for (let i = 0; i < 8 && n.parentElement; i++) {
+    const p = n.parentElement, pt = p.innerText || '';
+    if ((pt.match(/RTX\s*5080/gi) || []).length > 3 || pt.length > 1500) break;
+    n = p; t = pt;
+    if (/\d\s*€/.test(t) && /article|product|card|item|miniature/i.test((n.tagName + ' ' + n.className).toString())) break;
+  }
   return {href: a.href, own: own.slice(0, 300), text: t.slice(0, 800)};
 })"""
+
+
+def esperar_antibot(page, max_s=30):
+    """Los retos tipo Cloudflare ("Un momento…") se resuelven solos en un navegador real: se espera."""
+    t = time.time()
+    while bloqueado(page) and time.time() - t < max_s:
+        page.wait_for_timeout(1000)
+    if bloqueado(page):
+        raise RuntimeError("BLOQUEADO (antibot/captcha)")
+
+
+def aceptar_cookies(page):
+    for sel in ["#onetrust-accept-btn-handler", "#didomi-notice-agree-button", "#sp-cc-accept",
+                "button:has-text('Aceptar todas')", "button:has-text('Aceptar todo')", "button:has-text('Aceptar')"]:
+        try:
+            b = page.locator(sel).first
+            if b.is_visible(timeout=300):
+                b.click(timeout=1500)
+                page.wait_for_timeout(500)
+                return
+        except Exception:
+            pass
 
 
 def candidatos(page, url, tope=None):
     tope = tope or PRECIO_MAX
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(4000)
-    if bloqueado(page):
-        raise RuntimeError("BLOQUEADO (antibot/captcha)")
-    page.mouse.wheel(0, 5000)
+    page.wait_for_timeout(2500)
+    esperar_antibot(page)
+    aceptar_cookies(page)
     page.wait_for_timeout(1500)
+    for _ in range(10):  # baja hasta el final para que carguen todos los productos (carga perezosa)
+        page.mouse.wheel(0, 2500)
+        page.wait_for_timeout(500)
     res = {}
     for it in page.evaluate(JS_LISTADO):
-        if not MODELO.search(it["own"]) or not it["href"].startswith("http"):
+        if not es_rtx5080(it["own"]) or not it["href"].startswith("http") or len(urlsplit(it["href"]).path) < 3:
             continue
+        if not re.search(r"16\s?GB|GDDR7|tarjeta|gr[aá]fica|graphics", it["own"], re.I):
+            continue  # enlace de filtro/menú, no un producto
         ps = precios(it["text"])
-        if ps and min(ps) <= tope * 1.15:  # margen: el listado a veces muestra el precio sin descuento
-            u = normalizar(it["href"])
-            res.setdefault(u, {"url": u, "precio_listado": min(ps), "titulo": " ".join(it["own"].split())[:150],
-                               "texto": it["text"]})
-    return list(res.values())
+        if not ps or len(set(ps)) > 3:  # sin precio, o es un filtro/menú que abarca varios productos
+            continue
+        u = normalizar(it["href"])
+        if u in res:
+            continue
+        res[u] = {"url": u, "precio_listado": min(ps), "titulo": " ".join(it["own"].split())[:150],
+                  "texto": it["text"], "agotado_listado": bool(SIN_STOCK.search(it["text"]))}
+    return [c for c in res.values() if c["precio_listado"] <= tope * 1.15]  # margen: el listado a veces no aplica descuentos
 
 
 # ---------- ficha de producto: modelo, precio, stock ----------
@@ -146,19 +190,22 @@ JS_LDJSON = r"""() => { const out = [];
   return out; }"""
 
 JS_BOTON = r"""() => { const re = /añadir al carrito|añadir a la cesta|añadir a cesta|comprar ahora|^comprar$|add to cart/i;
-  return [...document.querySelectorAll('button, input[type=submit], a')].some(b => {
+  const h1 = document.querySelector('h1');
+  const ajeno = 'header, nav, footer, [class*="product-list"], [class*="miniature"], [class*="carousel"], ' +
+                '[class*="swiper"], [class*="slider"], [class*="related"], [class*="accessor"], [class*="upsell"], [class*="cross"]';
+  const cands = [...document.querySelectorAll('button, input[type=submit], a')].filter(b => {
     const t = (b.innerText || b.value || '').trim(); if (!re.test(t) || t.length > 40) return false;
-    const r = b.getBoundingClientRect(), cs = getComputedStyle(b);
-    return r.width > 0 && r.height > 0 && !b.disabled && b.getAttribute('aria-disabled') !== 'true'
-      && cs.visibility !== 'hidden' && cs.pointerEvents !== 'none' && !/disabled|agotado/i.test(b.className); }); }"""
+    const r = b.getBoundingClientRect(); if (r.width === 0 || r.height === 0) return false;
+    if (b.closest(ajeno)) return false;
+    return !h1 || (h1.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); });
+  const b = cands[0]; if (!b) return false;  // el botón principal es el primero tras el título
+  const cs = getComputedStyle(b);
+  return !b.disabled && b.getAttribute('aria-disabled') !== 'true' && cs.visibility !== 'hidden'
+    && cs.pointerEvents !== 'none' && !/disabled|agotado|out-of-stock/i.test(String(b.className)); }"""
 
 JS_ZONA = r"""() => { let n = document.querySelector('h1'); if (!n) return '';
   while (n.parentElement && (n.innerText || '').length < 1500) n = n.parentElement;
   return (n.innerText || '').slice(0, 6000); }"""
-
-SIN_STOCK = re.compile(r"agotad|sin stock|sin unidades|fuera de stock|no disponible|av[ií]same|notif[ií]came|"
-                       r"pr[oó]ximamente|pre-?venta|reserva|bajo pedido", re.I)
-
 
 CON_STOCK_LISTADO = re.compile(r"entrega (hoy|mañana|en \d+[^|\n]{0,20})|recíbelo [^|\n]{0,25}|en stock|"
                                r"env[ií]o (en|inmediato)[^|\n]{0,20}|disponible", re.I)
@@ -166,7 +213,13 @@ CON_STOCK_LISTADO = re.compile(r"entrega (hoy|mañana|en \d+[^|\n]{0,20})|recíb
 
 def verificar_generico(page):
     prods = page.evaluate(JS_LDJSON)
-    titulo = (prods[0].get("name") if prods else None) or page.locator("h1").first.inner_text(timeout=3000)
+    try:
+        titulo = page.locator("h1").first.inner_text(timeout=3000).strip()
+    except Exception:
+        titulo = ""
+    titulo = titulo or (prods[0].get("name") if prods else "") or ""
+    if not MODELO.search(titulo):
+        return {"titulo": titulo, "precio": 0.0, "stock": False, "motivo": "la ficha no es del producto", "vendedor": ""}
     disp, precio = [], None
     for p in prods:
         offs = p.get("offers") or []
@@ -184,7 +237,8 @@ def verificar_generico(page):
     # Regla principal: si se puede añadir al carrito, hay stock.
     if boton:
         stock, motivo = True, "confirmado: botón 'añadir al carrito' activo"
-    elif re.search(r"InStock|LimitedAvailability|OnlineOnly", disp_txt) and not negativo:
+    elif re.search(r"InStock|LimitedAvailability|OnlineOnly", disp_txt) and not re.search(r"OutOfStock|SoldOut", disp_txt) \
+            and not negativo:
         stock, motivo = True, "probable: la tienda lo marca en stock (no se detectó el botón)"
     else:
         stock, motivo = False, "sin botón de añadir al carrito"
@@ -218,13 +272,9 @@ def verificar_amazon(page):
 
 def verificar(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    page.wait_for_timeout(2500)
-    for _ in range(8):  # los retos antibot tipo "Un momento…" se resuelven solos en unos segundos
-        if not bloqueado(page):
-            break
-        page.wait_for_timeout(1500)
-    if bloqueado(page):
-        raise RuntimeError("BLOQUEADO (antibot/captcha)")
+    page.wait_for_timeout(2000)
+    esperar_antibot(page)
+    aceptar_cookies(page)
     return verificar_amazon(page) if "amazon." in url else verificar_generico(page)
 
 
@@ -256,23 +306,41 @@ def ciclo(browser, prueba=False, tope=None):
     viejo = json.loads(SEEN.read_text()) if SEEN.exists() else {}
     nuevo, alertas, fallidas, resumen = {}, [], set(), {}
     for nombre, url in tiendas(tope).items():
-        ctx = browser.new_context(locale="es-ES", user_agent=UA, viewport={"width": 1366, "height": 900})
-        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-        page = ctx.new_page()
+        page = browser.new_page()
         r = resumen[nombre] = {"estado": "OK", "candidatas": 0, "con_stock": []}
         try:
-            cands = candidatos(page, url, tope)
+            try:
+                cands = candidatos(page, url, tope)
+            except RuntimeError as e:
+                if "BLOQUEADO" not in str(e) or not browser.resolver_antibot(url):
+                    raise
+                page = browser.new_page()
+                cands = candidatos(page, url, tope)
             r["candidatas"] = len(cands)
             ficha_bloqueada = False
-            print(f"[{nombre}] {len(cands)} candidatas <= {tope:.0f}€ en el listado")
-            for c in sorted(cands, key=lambda x: x["precio_listado"])[:MAX_VERIFICAR]:
+            disponibles = [c for c in cands if not c["agotado_listado"]]
+            print(f"[{nombre}] {len(cands)} RTX 5080 <= {tope:.0f}€ en el listado "
+                  f"({len(cands) - len(disponibles)} marcadas como agotadas)")
+            abiertas = 0
+            for c in sorted(disponibles, key=lambda x: x["precio_listado"]):
+                # se recorre de más barata a más cara hasta tener MAX_VERIFICAR con stock (o abrir MAX_FICHAS fichas)
+                if len(r["con_stock"]) >= MAX_VERIFICAR or abiertas >= MAX_FICHAS:
+                    break
+                abiertas += 1
                 v = None
                 if not ficha_bloqueada:
                     try:
                         v = verificar(page, c["url"])
                     except Exception as e:
-                        print(f"   ? ficha no accesible ({str(e)[:60]}); se usa el listado")
-                        ficha_bloqueada = "BLOQUEADO" in str(e)
+                        if "BLOQUEADO" in str(e) and browser.resolver_antibot(c["url"]):
+                            page = browser.new_page()
+                            try:
+                                v = verificar(page, c["url"])
+                            except Exception as e2:
+                                e = e2
+                        if v is None:
+                            print(f"   ? ficha no accesible ({str(e)[:60]}); se usa el listado")
+                            ficha_bloqueada = "BLOQUEADO" in str(e)
                 if v is None:
                     # sin ficha: solo vale si el listado muestra un plazo de entrega real y no pone agotado
                     m = CON_STOCK_LISTADO.search(c["texto"])
@@ -280,6 +348,10 @@ def ciclo(browser, prueba=False, tope=None):
                     v = {"titulo": c["titulo"], "precio": None, "stock": ok, "vendedor": "",
                          "motivo": f"según el listado: '{m.group(0)}' (ficha no verificable)" if ok
                          else "listado sin plazo de entrega -> se asume sin stock"}
+                if v.get("precio") is not None and not MODELO.search(v["titulo"] or ""):
+                    # la "ficha" no es este producto (redirige a una categoría, producto retirado...)
+                    print(f"   -- {c['precio_listado']:.2f}€ | la ficha ya no muestra este producto | {c['titulo'][:70]}")
+                    continue
                 if not MODELO.search(v["titulo"] or ""):
                     v["titulo"] = c["titulo"]
                 precio = v["precio"] or c["precio_listado"]
@@ -302,7 +374,10 @@ def ciclo(browser, prueba=False, tope=None):
             r["estado"] = "ERROR: " + str(e).splitlines()[0][:120]
             print(f"[{nombre}] {r['estado']}")
         finally:
-            ctx.close()
+            try:
+                page.close()
+            except Exception:
+                pass
     if prueba:
         return resumen
     # conservar lo ya avisado de tiendas que han fallado esta vez (para no repetir avisos)
@@ -367,18 +442,18 @@ def informe(browser):
         lineas += [f"Comprobaciones automáticas en las últimas 24 h: {c24}", ""]
     if bajo:
         lineas += [f"⚠️ HAY {len(bajo)} RTX 5080 CON STOCK A ≤ {PRECIO_MAX:.0f} € AHORA MISMO (ya te habrá llegado el aviso):", ""]
-    lineas += ["Estado de cada tienda ahora mismo:"]
+    lineas += [f"Las {MAX_VERIFICAR} RTX 5080 más baratas CON STOCK de cada tienda (de menor a mayor):"]
     for n, r in resumen.items():
+        lineas.append("")
         if r["estado"] != "OK":
-            lineas.append(f"  ✗ {n}: {r['estado']}")
-        elif r["con_stock"]:
-            m = min(r["con_stock"], key=lambda h: h["precio"])
-            lineas.append(f"  ✓ {n}: la más barata con stock {m['precio']:.2f} € — {m['titulo'][:70]}")
-        else:
-            lineas.append(f"  ✓ {n}: leída bien, ninguna RTX 5080 con stock por debajo de {tope:.0f} €")
-    if todas:
-        lineas += ["", "Las 5 RTX 5080 más baratas con stock:"]
-        lineas += [f"  {h['precio']:.2f} € · {h['tienda']} · {h['titulo'][:70]}\n    {h['url']}" for h in todas[:5]]
+            lineas.append(f"✗ {n}: {r['estado']}")
+            continue
+        top = sorted(r["con_stock"], key=lambda h: h["precio"])[:MAX_VERIFICAR]
+        if not top:
+            lineas.append(f"✓ {n}: leída bien, ninguna RTX 5080 con stock entre sus {MAX_VERIFICAR} más baratas")
+            continue
+        lineas.append(f"✓ {n}:")
+        lineas += [f"   {h['precio']:8.2f} € · {h['titulo'][:75]}\n              {h['url']}" for h in top]
     if errores:
         lineas += ["", f"Ojo: {', '.join(errores)} ha(n) fallado en esta pasada. Si se repite varios días, "
                        "puede que la tienda haya cambiado su web o bloquee al bot."]
@@ -389,6 +464,73 @@ def informe(browser):
     cuerpo = "\n".join(lineas)
     print(asunto + "\n" + cuerpo)
     enviar_email(asunto, cuerpo)
+
+
+PERFIL = BASE / ".perfil-chrome"
+PUEDE_VENTANA = sys.platform == "darwin" or bool(os.getenv("DISPLAY"))
+
+
+class Navegador:
+    """Google Chrome real con un perfil propio, que guarda las cookies que dan los antibot (Cloudflare...).
+    Funciona sin ventana (headless). Si una tienda bloquea, abre un momento Chrome con ventana (fuera de la
+    pantalla), que pasa los retos más duros, guarda la cookie y vuelve al modo sin ventana."""
+
+    def __init__(self, p):
+        self.p, self.ctx, self.ua = p, None, None
+        self.abrir(ventana=os.getenv("VENTANA", "0") == "1")
+
+    def _lanzar(self, ventana, ua=None):
+        args = ["--disable-blink-features=AutomationControlled"]
+        if ventana:
+            args += ["--window-position=-2400,-2400", "--window-size=1366,900"]
+        op = dict(headless=not ventana, args=args, locale="es-ES", viewport={"width": 1366, "height": 900},
+                  ignore_default_args=["--enable-automation"])
+        if ua:
+            op["user_agent"] = ua
+        try:
+            return self.p.chromium.launch_persistent_context(str(PERFIL), channel="chrome", **op)
+        except Exception:
+            print("Aviso: Google Chrome no encontrado, uso Chromium (más bloqueos antibot)")
+            return self.p.chromium.launch_persistent_context(str(PERFIL), **op)
+
+    def abrir(self, ventana):
+        self.ventana = ventana
+        ctx = self._lanzar(ventana)
+        if not ventana:
+            # el user-agent de Chrome headless dice "HeadlessChrome": se usa el de un Chrome normal, misma versión
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+            self.ua = pg.evaluate("navigator.userAgent").replace("HeadlessChrome", "Chrome")
+            ctx.close()
+            ctx = self._lanzar(False, self.ua)
+        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        for pg in ctx.pages[1:]:
+            pg.close()
+        self.ctx = ctx
+
+    def new_page(self):
+        return self.ctx.new_page()
+
+    def resolver_antibot(self, url):
+        """Abre la URL con ventana para superar el reto antibot. Devuelve True si lo consigue."""
+        if self.ventana or not PUEDE_VENTANA:
+            return False
+        print(f"   ... reto antibot: lo resuelvo con una ventana de Chrome ({urlsplit(url).netloc})")
+        self.ctx.close()
+        self.abrir(ventana=True)
+        ok = False
+        try:
+            pg = self.new_page()
+            pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+            esperar_antibot(pg, 45)
+            ok = True
+        except Exception as e:
+            print(f"   ... no se pudo superar: {str(e)[:80]}")
+        self.ctx.close()
+        self.abrir(ventana=False)
+        return ok
+
+    def close(self):
+        self.ctx.close()
 
 
 def arg(nombre, defecto=None):
@@ -409,13 +551,7 @@ if __name__ == "__main__":
     loop, duracion = int(arg("--loop", 0)), int(arg("--duracion", 0))
     inicio = time.time()
     with sync_playwright() as p:
-        # Google Chrome real (pasa el antibot de PCComponentes); si no está instalado, Chromium de Playwright
-        args = ["--disable-blink-features=AutomationControlled"]
-        try:
-            browser = p.chromium.launch(headless=True, channel="chrome", args=args)
-        except Exception:
-            print("Aviso: Google Chrome no encontrado, uso Chromium (PCComponentes puede bloquear las fichas)")
-            browser = p.chromium.launch(headless=True, args=args)
+        browser = Navegador(p)
         if "--informe" in sys.argv:
             informe(browser)
             sys.exit()

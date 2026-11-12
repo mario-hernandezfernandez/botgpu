@@ -37,7 +37,7 @@ jobs:
           restore-keys: seen-
 
       - name: Buscar RTX 5080
-        run: python bot.py --duracion 280
+        run: xvfb-run -a python bot.py --duracion 280
         env:
           PRECIO_MAX: ${{ vars.PRECIO_MAX || '1700' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

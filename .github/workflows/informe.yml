@@ -30,11 +30,10 @@ jobs:
           python -m playwright install --with-deps chrome chromium
 
       - name: Enviar check diario
-        run: python bot.py --informe
+        run: xvfb-run -a python bot.py --informe
         env:
           CRON: ${{ github.event.schedule }}
           GITHUB_TOKEN: ${{ github.token }}
-          MAX_VERIFICAR: "5"
           PRECIO_MAX: ${{ vars.PRECIO_MAX || '1700' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}

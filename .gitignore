@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 # contiene rutas locales de este Mac
 com.rtx5080.bot.plist
+.perfil-chrome/
