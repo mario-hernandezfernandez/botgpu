@@ -1,26 +1,49 @@
 name: RTX 5080 stock check
+
 on:
   schedule:
     - cron: "*/5 * * * *"   # GitHub no garantiza puntualidad; cada ejecución hace varias pasadas
   workflow_dispatch:
-concurrency: {group: rtx5080, cancel-in-progress: false}
+
+concurrency:
+  group: rtx5080
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: {python-version: "3.12", cache: pip}
-      - run: pip install -r requirements.txt && python -m playwright install --with-deps chrome chromium
-      - uses: actions/cache/restore@v4
-        with: {path: seen.json, key: seen-${{ github.run_id }}, restore-keys: seen-}
-      - run: python bot.py --duracion 280
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chrome chromium
+
+      - name: Recuperar avisos ya enviados
+        uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+
+      - name: Buscar RTX 5080
+        run: python bot.py --duracion 280
         env:
           PRECIO_MAX: ${{ vars.PRECIO_MAX || '1700' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-      - if: always()
+
+      - name: Guardar avisos enviados
+        if: always()
         uses: actions/cache/save@v4
-        with: {path: seen.json, key: seen-${{ github.run_id }}}
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
