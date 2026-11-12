@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "*/5 * * * *"   # GitHub no garantiza puntualidad; cada ejecución hace varias pasadas
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["bot.py", "requirements.txt", ".github/workflows/check.yml"]
 
 concurrency:
   group: rtx5080
