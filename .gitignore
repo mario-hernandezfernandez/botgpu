@@ -7,3 +7,4 @@ __pycache__/
 # contiene rutas locales de este Mac
 com.rtx5080.bot.plist
 .perfil-chrome/
+.perfil-chrome-manual/

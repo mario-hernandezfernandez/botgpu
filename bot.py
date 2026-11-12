@@ -1,7 +1,7 @@
 """Avisador de NVIDIA RTX 5080 CON STOCK a <= PRECIO_MAX (por email).
 
   python bot.py                  una pasada
-  python bot.py --loop 60        pasadas sin fin, 60 s entre ellas (Mac)
+  python bot.py --loop 120       pasadas sin fin, 2 min entre ellas (Mac)
   python bot.py --duracion 270   pasadas seguidas durante 270 s (GitHub Actions)
   python bot.py --test-email     envía un email de prueba
   python bot.py --prueba 2500    diagnóstico: qué encontraría con ese precio (no envía email)
@@ -38,7 +38,7 @@ AMAZON_VENDEDORES = [v.strip().lower() for v in os.getenv(
     "AMAZON_VENDEDORES",
     "amazon,msi,asus,gigabyte,aorus,zotac,pny,inno3d,palit,gainward,kfa2,galax,nvidia").split(",")]
 MAX_VERIFICAR = int(os.getenv("MAX_VERIFICAR", "5"))  # nº de RTX 5080 con stock a reunir por tienda (las más baratas)
-MAX_FICHAS = int(os.getenv("MAX_FICHAS", "10"))       # tope de fichas abiertas por tienda y pasada
+MAX_FICHAS = int(os.getenv("MAX_FICHAS", "15"))       # tope de fichas abiertas por tienda y pasada
 SEEN = BASE / "seen.json"
 
 
@@ -319,9 +319,7 @@ def ciclo(browser, prueba=False, tope=None):
             r["candidatas"] = len(cands)
             ficha_bloqueada = False
             disponibles = [c for c in cands if not c["agotado_listado"]]
-            print(f"[{nombre}] {len(cands)} RTX 5080 <= {tope:.0f}€ en el listado "
-                  f"({len(cands) - len(disponibles)} marcadas como agotadas)")
-            abiertas = 0
+            abiertas, descartadas = 0, 0
             for c in sorted(disponibles, key=lambda x: x["precio_listado"]):
                 # se recorre de más barata a más cara hasta tener MAX_VERIFICAR con stock (o abrir MAX_FICHAS fichas)
                 if len(r["con_stock"]) >= MAX_VERIFICAR or abiertas >= MAX_FICHAS:
@@ -339,7 +337,6 @@ def ciclo(browser, prueba=False, tope=None):
                             except Exception as e2:
                                 e = e2
                         if v is None:
-                            print(f"   ? ficha no accesible ({str(e)[:60]}); se usa el listado")
                             ficha_bloqueada = "BLOQUEADO" in str(e)
                 if v is None:
                     # sin ficha: solo vale si el listado muestra un plazo de entrega real y no pone agotado
@@ -350,7 +347,7 @@ def ciclo(browser, prueba=False, tope=None):
                          else "listado sin plazo de entrega -> se asume sin stock"}
                 if v.get("precio") is not None and not MODELO.search(v["titulo"] or ""):
                     # la "ficha" no es este producto (redirige a una categoría, producto retirado...)
-                    print(f"   -- {c['precio_listado']:.2f}€ | la ficha ya no muestra este producto | {c['titulo'][:70]}")
+                    descartadas += 1
                     continue
                 if not MODELO.search(v["titulo"] or ""):
                     v["titulo"] = c["titulo"]
@@ -359,8 +356,9 @@ def ciclo(browser, prueba=False, tope=None):
                     continue
                 modelo_ok = es_rtx5080(v["titulo"])
                 valida = modelo_ok and v["stock"] and PRECIO_MIN <= precio <= tope
-                print(f"   {'OK' if valida else '--'} {precio:.2f}€ | {'5080' if modelo_ok else 'NO-5080'} | "
-                      f"{v['motivo']}{' | ' + v['vendedor'] if v['vendedor'] else ''} | {v['titulo'][:70]}")
+                if not valida:
+                    descartadas += 1
+                    continue
                 if valida:
                     h = {"tienda": nombre, "precio": precio, "url": c["url"], "titulo": v["titulo"],
                          "motivo": v["motivo"], "vendedor": v["vendedor"]}
@@ -369,6 +367,12 @@ def ciclo(browser, prueba=False, tope=None):
                         nuevo[c["url"]] = h
                         if c["url"] not in viejo or precio < viejo[c["url"]]["precio"]:
                             alertas.append(h)
+            r["con_stock"].sort(key=lambda h: h["precio"])
+            agotadas = len(cands) - len(disponibles) + descartadas
+            print(f"[{nombre}] {len(r['con_stock'])} RTX 5080 con stock <= {tope:.0f}€"
+                  + (f" (ignoradas {agotadas} agotadas/no comprables)" if agotadas else ""))
+            for h in r["con_stock"]:
+                print(f"   {h['precio']:8.2f}€ | {h['titulo'][:75]}{' | ' + h['vendedor'] if h['vendedor'] else ''}")
         except Exception as e:
             fallidas.add(nombre)
             r["estado"] = "ERROR: " + str(e).splitlines()[0][:120]
@@ -466,7 +470,8 @@ def informe(browser):
     enviar_email(asunto, cuerpo)
 
 
-PERFIL = BASE / ".perfil-chrome"
+# Cada tipo de ejecución usa su propio perfil: Chrome no permite dos procesos con el mismo perfil a la vez
+PERFIL = BASE / (".perfil-chrome" if ("--loop" in sys.argv or "--duracion" in sys.argv) else ".perfil-chrome-manual")
 PUEDE_VENTANA = sys.platform == "darwin" or bool(os.getenv("DISPLAY"))
 
 
@@ -489,8 +494,10 @@ class Navegador:
             op["user_agent"] = ua
         try:
             return self.p.chromium.launch_persistent_context(str(PERFIL), channel="chrome", **op)
-        except Exception:
-            print("Aviso: Google Chrome no encontrado, uso Chromium (más bloqueos antibot)")
+        except Exception as e:
+            if "ProcessSingleton" in str(e) or "SingletonLock" in str(e):
+                raise RuntimeError("el perfil de Chrome está en uso por otro proceso del bot") from None
+            print(f"Aviso: no se pudo abrir Google Chrome ({str(e).splitlines()[0][:80]}); uso Chromium")
             return self.p.chromium.launch_persistent_context(str(PERFIL), **op)
 
     def abrir(self, ventana):
@@ -516,16 +523,19 @@ class Navegador:
             return False
         print(f"   ... reto antibot: lo resuelvo con una ventana de Chrome ({urlsplit(url).netloc})")
         self.ctx.close()
-        self.abrir(ventana=True)
         ok = False
         try:
+            self.abrir(ventana=True)
             pg = self.new_page()
             pg.goto(url, wait_until="domcontentloaded", timeout=45000)
             esperar_antibot(pg, 45)
             ok = True
         except Exception as e:
             print(f"   ... no se pudo superar: {str(e)[:80]}")
-        self.ctx.close()
+        try:
+            self.ctx.close()
+        except Exception:
+            pass
         self.abrir(ventana=False)
         return ok
 

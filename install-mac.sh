@@ -12,7 +12,7 @@ cat > "$P" <<PLIST
 <plist version="1.0"><dict>
   <key>Label</key><string>com.rtx5080.bot</string>
   <key>ProgramArguments</key><array>
-    <string>$X/.venv/bin/python</string><string>$X/bot.py</string><string>--loop</string><string>60</string>
+    <string>$X/.venv/bin/python</string><string>$X/bot.py</string><string>--loop</string><string>120</string>
   </array>
   <key>WorkingDirectory</key><string>$X</string>
   <key>RunAtLoad</key><true/>

@@ -14,7 +14,7 @@ Solo te avisa una vez por producto, y otra vez si baja de precio.
 3. `cp .env.example .env` y rellena `SMTP_USER`, `SMTP_PASS` y `EMAIL_TO`.
 4. Prueba: `.venv/bin/python bot.py --test-email`
 
-## 2. En el Mac (cada ~60 s, mientras esté encendido)
+## 2. En el Mac (cada ~2 min, mientras esté encendido)
 ```bash
 ./install-mac.sh                                                 # instala y arranca (y en cada inicio de sesión)
 tail -f bot.log                                                  # ver lo que hace
