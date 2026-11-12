@@ -37,13 +37,13 @@ PRECIO_MIN = float(os.getenv("PRECIO_MIN", "700"))  # por debajo = accesorios, e
 AMAZON_VENDEDORES = [v.strip().lower() for v in os.getenv(
     "AMAZON_VENDEDORES",
     "amazon,msi,asus,gigabyte,aorus,zotac,pny,inno3d,palit,gainward,kfa2,galax,nvidia").split(",")]
-MAX_VERIFICAR = 8  # fichas de producto a abrir por tienda y pasada
+MAX_VERIFICAR = int(os.getenv("MAX_VERIFICAR", "8"))  # fichas de producto a abrir por tienda y pasada
 SEEN = BASE / "seen.json"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
-def tiendas():
-    a, b = int(PRECIO_MIN * 100), int(PRECIO_MAX * 100)
+def tiendas(tope=None):
+    a, b = int(PRECIO_MIN * 100), int((tope or PRECIO_MAX) * 100)
     return {
         "PCComponentes": "https://www.pccomponentes.com/buscar/?query=rtx%205080",
         "Coolmod": "https://www.coolmod.com/tarjetas-graficas/?q=rtx+5080",
@@ -117,7 +117,8 @@ JS_LISTADO = r"""() => [...document.querySelectorAll('a[href]')].map(a => {
 })"""
 
 
-def candidatos(page, url):
+def candidatos(page, url, tope=None):
+    tope = tope or PRECIO_MAX
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(4000)
     if bloqueado(page):
@@ -129,7 +130,7 @@ def candidatos(page, url):
         if not MODELO.search(it["own"]) or not it["href"].startswith("http"):
             continue
         ps = precios(it["text"])
-        if ps and min(ps) <= PRECIO_MAX * 1.15:  # margen: el listado a veces muestra el precio sin descuento
+        if ps and min(ps) <= tope * 1.15:  # margen: el listado a veces muestra el precio sin descuento
             u = normalizar(it["href"])
             res.setdefault(u, {"url": u, "precio_listado": min(ps), "titulo": " ".join(it["own"].split())[:150],
                                "texto": it["text"]})
@@ -248,17 +249,22 @@ def notificar_mac(texto):
                        check=False)
 
 
-def ciclo(browser, prueba=False):
+def ciclo(browser, prueba=False, tope=None):
+    """tope: precio hasta el que se buscan y verifican tarjetas (por defecto PRECIO_MAX).
+    Solo se avisa de las que están a <= PRECIO_MAX. Devuelve un resumen por tienda."""
+    tope = tope or PRECIO_MAX
     viejo = json.loads(SEEN.read_text()) if SEEN.exists() else {}
-    nuevo, alertas, fallidas = {}, [], set()
-    for nombre, url in tiendas().items():
+    nuevo, alertas, fallidas, resumen = {}, [], set(), {}
+    for nombre, url in tiendas(tope).items():
         ctx = browser.new_context(locale="es-ES", user_agent=UA, viewport={"width": 1366, "height": 900})
         ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         page = ctx.new_page()
+        r = resumen[nombre] = {"estado": "OK", "candidatas": 0, "con_stock": []}
         try:
-            cands = candidatos(page, url)
+            cands = candidatos(page, url, tope)
+            r["candidatas"] = len(cands)
             ficha_bloqueada = False
-            print(f"[{nombre}] {len(cands)} candidatas <= {PRECIO_MAX:.0f}€ en el listado")
+            print(f"[{nombre}] {len(cands)} candidatas <= {tope:.0f}€ en el listado")
             for c in sorted(cands, key=lambda x: x["precio_listado"])[:MAX_VERIFICAR]:
                 v = None
                 if not ficha_bloqueada:
@@ -277,25 +283,28 @@ def ciclo(browser, prueba=False):
                 if not MODELO.search(v["titulo"] or ""):
                     v["titulo"] = c["titulo"]
                 precio = v["precio"] or c["precio_listado"]
-                if not v["precio"] and c["precio_listado"] > PRECIO_MAX:
+                if not v["precio"] and c["precio_listado"] > tope:
                     continue
                 modelo_ok = es_rtx5080(v["titulo"])
-                valida = modelo_ok and v["stock"] and PRECIO_MIN <= precio <= PRECIO_MAX
+                valida = modelo_ok and v["stock"] and PRECIO_MIN <= precio <= tope
                 print(f"   {'OK' if valida else '--'} {precio:.2f}€ | {'5080' if modelo_ok else 'NO-5080'} | "
                       f"{v['motivo']}{' | ' + v['vendedor'] if v['vendedor'] else ''} | {v['titulo'][:70]}")
                 if valida:
                     h = {"tienda": nombre, "precio": precio, "url": c["url"], "titulo": v["titulo"],
                          "motivo": v["motivo"], "vendedor": v["vendedor"]}
-                    nuevo[c["url"]] = h
-                    if c["url"] not in viejo or precio < viejo[c["url"]]["precio"]:
-                        alertas.append(h)
+                    r["con_stock"].append(h)
+                    if precio <= PRECIO_MAX:
+                        nuevo[c["url"]] = h
+                        if c["url"] not in viejo or precio < viejo[c["url"]]["precio"]:
+                            alertas.append(h)
         except Exception as e:
             fallidas.add(nombre)
-            print(f"[{nombre}] ERROR: {str(e).splitlines()[0][:120]}")
+            r["estado"] = "ERROR: " + str(e).splitlines()[0][:120]
+            print(f"[{nombre}] {r['estado']}")
         finally:
             ctx.close()
     if prueba:
-        return
+        return resumen
     # conservar lo ya avisado de tiendas que han fallado esta vez (para no repetir avisos)
     nuevo.update({k: v for k, v in viejo.items() if v["tienda"] in fallidas and k not in nuevo})
     SEEN.write_text(json.dumps(nuevo, ensure_ascii=False, indent=1))
@@ -309,6 +318,77 @@ def ciclo(browser, prueba=False):
         print(">>> ALERTA\n" + cuerpo)
         notificar_mac(asunto)
         enviar_email(asunto, cuerpo)
+    return resumen
+
+
+# ---------- informe diario ----------
+def toca_informe():
+    """GitHub programa el informe a dos horas UTC (verano/invierno); solo se envía la que cae ~20:00 en España."""
+    cron = os.getenv("CRON", "").split()
+    if len(cron) < 2:
+        return True  # lanzado a mano
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    desfase = int(datetime.now(ZoneInfo("Europe/Madrid")).utcoffset().total_seconds() // 3600)
+    return int(cron[1]) + desfase == 19  # cron a las XX:50 UTC -> 19:50 en España, llega sobre las 20:00
+
+
+def comprobaciones_24h():
+    """Cuenta las ejecuciones del workflow de vigilancia en las últimas 24 h (solo en GitHub Actions)."""
+    token, repo = os.getenv("GITHUB_TOKEN"), os.getenv("GITHUB_REPOSITORY")
+    if not token or not repo:
+        return None
+    import urllib.request
+    from datetime import datetime, timedelta, timezone
+    desde = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/check.yml/runs?per_page=100&created=%3E%3D{desde}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+                                               "Accept": "application/vnd.github+json"})
+    try:
+        runs = json.load(urllib.request.urlopen(req, timeout=20)).get("workflow_runs", [])
+    except Exception as e:
+        return f"no se pudo consultar ({e})"
+    ok = sum(r["conclusion"] == "success" for r in runs)
+    fallos = sum(r["conclusion"] not in ("success", None, "cancelled", "skipped") for r in runs)
+    ultima = runs[0]["created_at"].replace("T", " ").replace("Z", " UTC") if runs else "ninguna"
+    return f"{len(runs)} ejecuciones ({ok} correctas, {fallos} con fallo). Última: {ultima}"
+
+
+def informe(browser):
+    tope = float(os.getenv("INFORME_TOPE", "3500"))
+    resumen = ciclo(browser, prueba=True, tope=tope)
+    todas = sorted((h for r in resumen.values() for h in r["con_stock"]), key=lambda h: h["precio"])
+    errores = [n for n, r in resumen.items() if r["estado"] != "OK"]
+    bajo = [h for h in todas if h["precio"] <= PRECIO_MAX]
+
+    lineas = [f"El bot está funcionando. Límite de aviso: {PRECIO_MAX:.0f} €.", ""]
+    c24 = comprobaciones_24h()
+    if c24:
+        lineas += [f"Comprobaciones automáticas en las últimas 24 h: {c24}", ""]
+    if bajo:
+        lineas += [f"⚠️ HAY {len(bajo)} RTX 5080 CON STOCK A ≤ {PRECIO_MAX:.0f} € AHORA MISMO (ya te habrá llegado el aviso):", ""]
+    lineas += ["Estado de cada tienda ahora mismo:"]
+    for n, r in resumen.items():
+        if r["estado"] != "OK":
+            lineas.append(f"  ✗ {n}: {r['estado']}")
+        elif r["con_stock"]:
+            m = min(r["con_stock"], key=lambda h: h["precio"])
+            lineas.append(f"  ✓ {n}: la más barata con stock {m['precio']:.2f} € — {m['titulo'][:70]}")
+        else:
+            lineas.append(f"  ✓ {n}: leída bien, ninguna RTX 5080 con stock por debajo de {tope:.0f} €")
+    if todas:
+        lineas += ["", "Las 5 RTX 5080 más baratas con stock:"]
+        lineas += [f"  {h['precio']:.2f} € · {h['tienda']} · {h['titulo'][:70]}\n    {h['url']}" for h in todas[:5]]
+    if errores:
+        lineas += ["", f"Ojo: {', '.join(errores)} ha(n) fallado en esta pasada. Si se repite varios días, "
+                       "puede que la tienda haya cambiado su web o bloquee al bot."]
+
+    mas_barata = f"la más barata {todas[0]['precio']:.0f} €" if todas else "sin RTX 5080 con stock"
+    estado = "TODO OK" if not errores else f"{len(errores)} tienda(s) con error"
+    asunto = f"Check diario RTX 5080: {estado} · {mas_barata}"
+    cuerpo = "\n".join(lineas)
+    print(asunto + "\n" + cuerpo)
+    enviar_email(asunto, cuerpo)
 
 
 def arg(nombre, defecto=None):
@@ -319,6 +399,9 @@ if __name__ == "__main__":
     if "--test-email" in sys.argv:
         enviar_email("Test bot RTX 5080", "Si lees esto, los avisos por email funcionan.")
         print("Email de prueba enviado")
+        sys.exit()
+    if "--informe" in sys.argv and not toca_informe():
+        print("Esta hora programada no corresponde a las 20:00 en España (cambio de horario): no se envía.")
         sys.exit()
     prueba = arg("--prueba")
     if prueba:
@@ -333,6 +416,9 @@ if __name__ == "__main__":
         except Exception:
             print("Aviso: Google Chrome no encontrado, uso Chromium (PCComponentes puede bloquear las fichas)")
             browser = p.chromium.launch(headless=True, args=args)
+        if "--informe" in sys.argv:
+            informe(browser)
+            sys.exit()
         while True:
             print(time.strftime("== %Y-%m-%d %H:%M:%S =="), flush=True)
             ciclo(browser, prueba=bool(prueba))

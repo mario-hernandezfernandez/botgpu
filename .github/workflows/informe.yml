@@ -1,0 +1,41 @@
+name: Check diario 20:00
+
+on:
+  schedule:
+    # GitHub usa hora UTC: 17:50 UTC = 19:50 en verano y 18:50 UTC = 19:50 en invierno (España).
+    # El bot solo envía el de la hora que toca, así llega sobre las 20:00 todo el año.
+    - cron: "50 17 * * *"
+    - cron: "50 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  informe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chrome chromium
+
+      - name: Enviar check diario
+        run: python bot.py --informe
+        env:
+          CRON: ${{ github.event.schedule }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MAX_VERIFICAR: "5"
+          PRECIO_MAX: ${{ vars.PRECIO_MAX || '1700' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}

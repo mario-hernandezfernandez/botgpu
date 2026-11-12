@@ -33,6 +33,13 @@ Se lanza cada 5 min y cada ejecución hace pasadas durante ~4-5 min. GitHub a ve
 Con el repositorio **público** los minutos son ilimitados; en uno privado, el plan gratuito (2000 min/mes) se agota en ~1 día. Además, las IPs de GitHub
 pueden recibir más bloqueos antibot que tu casa.
 
+## Check diario (20:00)
+Todos los días sobre las 20:00 (hora de España) GitHub te envía un email "Check diario RTX 5080" con:
+el estado de cada tienda (si se ha podido leer), la RTX 5080 más barata con stock en cada una, las 5 más baratas
+y cuántas comprobaciones automáticas se han hecho en las últimas 24 h.
+**Si un día no te llega, algo falla.** Para probarlo a mano: Actions > "Check diario 20:00" > Run workflow,
+o en el Mac `.venv/bin/python bot.py --informe`.
+
 ## Diagnóstico
 `.venv/bin/python bot.py --prueba 2300` muestra todo lo que encontraría a ese precio y por qué lo acepta o lo descarta (no envía email).
 
