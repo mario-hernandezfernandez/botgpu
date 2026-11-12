@@ -2,8 +2,22 @@ name: diag
 on:
   push:
     paths: [".github/workflows/diag.yml"]
+concurrency:
+  group: rtx5080diag
+  cancel-in-progress: false
 jobs:
   hola:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
-      - run: echo "Actions funciona"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+      - run: echo "PRECIO=${{ vars.PRECIO_MAX || '1700' }}"
